@@ -24,12 +24,7 @@ import org.apache.commons.collections4.Equator;
 import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.collections4.functors.DefaultEquator;
 
-import java.util.ArrayList;
-import java.util.EnumSet;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * User: gopi.vishwakarma
@@ -53,7 +48,13 @@ public final class JsonDiff {
         return asJson(source, target, flags, null);
     }
 
-    public static JsonNode asJson(final JsonNode source, final JsonNode target, EnumSet<DiffFlags> flags, ArrayObjectHashGenerator hashGenerator) {
+    public static JsonNode asJson(final JsonNode source, final JsonNode target, EnumSet<DiffFlags> flags, DiffFunctions functions) {
+
+        // if custom functions aren't provided, we use default
+        if (functions == null) {
+            functions = new DefaultDiffFunctions();
+        }
+
         JsonDiff diff = new JsonDiff(flags);
         if (source == null && target != null) {
             // return add node at root pointing to the target
@@ -64,7 +65,7 @@ public final class JsonDiff {
             diff.diffs.add(Diff.generateDiff(Operation.REMOVE, JsonPointer.ROOT, source));
         }
         if (source != null && target != null) {
-            diff.generateDiffs(JsonPointer.ROOT, source, target, hashGenerator);
+            diff.generateDiffs(JsonPointer.ROOT, source, target, functions);
 
             if (!flags.contains(DiffFlags.OMIT_MOVE_OPERATION))
                 // Merging remove & add to move operation
@@ -357,17 +358,17 @@ public final class JsonDiff {
         return jsonNode;
     }
 
-    private void generateDiffs(JsonPointer path, JsonNode source, JsonNode target, ArrayObjectHashGenerator hashGenerator) {
+    private void generateDiffs(JsonPointer path, JsonNode source, JsonNode target, DiffFunctions functions) {
         if (!source.equals(target)) {
             final NodeType sourceType = NodeType.getNodeType(source);
             final NodeType targetType = NodeType.getNodeType(target);
 
             if (sourceType == NodeType.ARRAY && targetType == NodeType.ARRAY) {
                 //both are arrays
-                compareArray(path, source, target, hashGenerator);
+                compareArray(path, source, target, functions);
             } else if (sourceType == NodeType.OBJECT && targetType == NodeType.OBJECT) {
                 //both are json
-                compareObjects(path, source, target, hashGenerator);
+                compareObjects(path, source, target, functions);
             } else {
                 //can be replaced
                 if (flags.contains(DiffFlags.EMIT_TEST_OPERATIONS))
@@ -377,8 +378,8 @@ public final class JsonDiff {
         }
     }
 
-    private void compareArray(JsonPointer path, JsonNode source, JsonNode target, ArrayObjectHashGenerator hashGenerator) {
-        List<JsonNode> lcs = getLCS(path, source, target, hashGenerator);
+    private void compareArray(JsonPointer path, JsonNode source, JsonNode target, DiffFunctions functions) {
+        List<JsonNode> lcs = getLCS(path, source, target, functions);
         int srcIdx = 0;
         int targetIdx = 0;
         int lcsIdx = 0;
@@ -393,19 +394,19 @@ public final class JsonDiff {
             JsonNode targetNode = target.get(targetIdx);
             JsonPointer currPath = path.append(pos);
 
-            if (entryEquals(path, lcsNode, srcNode, hashGenerator) && entryEquals(path, lcsNode, targetNode, hashGenerator)) { // Both are same as lcs node, nothing to do here
-                generateDiffs(currPath, srcNode, targetNode, hashGenerator); // Found a common entry, now find differences within
+            if (entryEquals(path, lcsNode, srcNode, functions) && entryEquals(path, lcsNode, targetNode, functions)) { // Both are same as lcs node, nothing to do here
+                generateDiffs(currPath, srcNode, targetNode, functions); // Found a common entry, now find differences within
                 srcIdx++;
                 targetIdx++;
                 lcsIdx++;
                 pos++;
             } else {
-                if (entryEquals(path, lcsNode, srcNode, hashGenerator)) { // src node is same as lcs, but not targetNode
+                if (entryEquals(path, lcsNode, srcNode, functions)) { // src node is same as lcs, but not targetNode
                     //addition
                     diffs.add(Diff.generateDiff(Operation.ADD, currPath, targetNode));
                     pos++;
                     targetIdx++;
-                } else if (entryEquals(path, lcsNode, targetNode, hashGenerator)) { //targetNode node is same as lcs, but not src
+                } else if (entryEquals(path, lcsNode, targetNode, functions)) { //targetNode node is same as lcs, but not src
                     //removal,
                     if (flags.contains(DiffFlags.EMIT_TEST_OPERATIONS))
                         diffs.add(new Diff(Operation.TEST, currPath, srcNode));
@@ -413,7 +414,7 @@ public final class JsonDiff {
                     srcIdx++;
                 } else {
                     //both are unequal to lcs node
-                    generateDiffs(currPath, srcNode, targetNode, hashGenerator);
+                    generateDiffs(currPath, srcNode, targetNode, functions);
                     srcIdx++;
                     targetIdx++;
                     pos++;
@@ -425,7 +426,7 @@ public final class JsonDiff {
             JsonNode srcNode = source.get(srcIdx);
             JsonNode targetNode = target.get(targetIdx);
             JsonPointer currPath = path.append(pos);
-            generateDiffs(currPath, srcNode, targetNode, hashGenerator);
+            generateDiffs(currPath, srcNode, targetNode, functions);
             srcIdx++;
             targetIdx++;
             pos++;
@@ -434,21 +435,9 @@ public final class JsonDiff {
         removeRemaining(path, pos, srcIdx, srcSize, source);
     }
 
-    private static boolean entryEquals(JsonPointer parentPath, JsonNode node1, JsonNode node2, ArrayObjectHashGenerator hashGenerator)
+    private static boolean entryEquals(JsonPointer parentPath, JsonNode node1, JsonNode node2, DiffFunctions functions)
     {
-        if (node1.equals(node2))
-        {
-            return true;
-        }
-        else if (hashGenerator != null && node1.isObject() && node2.isObject())
-        {
-            String hash1 = hashGenerator.hash(parentPath.toString(), (ObjectNode) node1);
-            String hash2 = hashGenerator.hash(parentPath.toString(), (ObjectNode) node2);
-
-            return hash1.equals(hash2);
-        }
-
-        return false;
+        return functions.entryEquals(parentPath, node1, node2);
     }
 
     private void removeRemaining(JsonPointer path, int pos, int srcIdx, int srcSize, JsonNode source) {
@@ -472,7 +461,7 @@ public final class JsonDiff {
         return pos;
     }
 
-    private void compareObjects(JsonPointer path, JsonNode source, JsonNode target, ArrayObjectHashGenerator hashGenerator) {
+    private void compareObjects(JsonPointer path, JsonNode source, JsonNode target, DiffFunctions functions) {
         Iterator<String> keysFromSrc = source.fieldNames();
         while (keysFromSrc.hasNext()) {
             String key = keysFromSrc.next();
@@ -485,7 +474,7 @@ public final class JsonDiff {
                 continue;
             }
             JsonPointer currPath = path.append(key);
-            generateDiffs(currPath, source.get(key), target.get(key), hashGenerator);
+            generateDiffs(currPath, source.get(key), target.get(key), functions);
         }
         Iterator<String> keysFromTarget = target.fieldNames();
         while (keysFromTarget.hasNext()) {
@@ -498,9 +487,9 @@ public final class JsonDiff {
         }
     }
 
-    private static List<JsonNode> getLCS(final JsonPointer path, final JsonNode first, final JsonNode second, final ArrayObjectHashGenerator hashGenerator) {
+    private static List<JsonNode> getLCS(final JsonPointer path, final JsonNode first, final JsonNode second, final DiffFunctions functions) {
         Equator<JsonNode> equator = DefaultEquator.defaultEquator();
-        if (hashGenerator != null)
+        if (functions != null)
         {
             // If an ArrayObjectHashGenerator is provided, use it to compare array entries when calculating LCS
             equator = new Equator<JsonNode>()
@@ -508,18 +497,14 @@ public final class JsonDiff {
                 @Override
                 public boolean equate(JsonNode node1, JsonNode node2)
                 {
-                    return entryEquals(path, node1, node2, hashGenerator);
+                    return functions.entryEquals(path, node1, node2);
                 }
 
                 @Override
                 public int hash(JsonNode jsonNode)
                 {
-                    if (jsonNode.isObject())
-                    {
-                        return hashGenerator.hash(path.toString(), (ObjectNode) jsonNode).hashCode();
-                    }
-
-                    return jsonNode.hashCode();
+                    throw new RuntimeException("Not used");
+                    //return functions.hash(path.toString(), jsonNode);
                 }
             };
         }
